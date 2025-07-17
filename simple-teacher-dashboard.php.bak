@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Simple Teacher Dashboard
  * Description: A simplified teacher dashboard showing only teacher's groups, students, and grades
- * Version: 2.0.0
+ * Version: 2.1.0
  * Author: Your Name
  */
 
@@ -192,39 +192,57 @@ class Simple_Teacher_Dashboard {
         return $wpdb->get_results($wpdb->prepare($query, $meta_key));
     }
     
+    /**
+     * Get quiz statistics for a student using the working pattern from QUERIES_SUCCESS.md
+     */
     private function get_student_quiz_stats($student_id) {
         global $wpdb;
         
         // Use the Student Summary Query pattern from QUERIES_SUCCESS.md
         $query = "
             SELECT 
+                s.ID as student_id,
+                s.display_name as student_name,
                 COUNT(DISTINCT ua.post_id) as total_quizzes,
                 SUM(CASE WHEN ua.activity_status = 1 THEN 1 ELSE 0 END) as completed_quizzes,
                 ROUND((SUM(CASE WHEN ua.activity_status = 1 THEN 1 ELSE 0 END) / 
-                       COUNT(DISTINCT ua.post_id) * 100), 2) as overall_success_rate
+                       COUNT(DISTINCT ua.post_id) * 100), 2) as overall_success_rate,
+                GROUP_CONCAT(DISTINCT c.post_title ORDER BY c.post_title SEPARATOR ', ') as courses,
+                DATE_FORMAT(MIN(FROM_UNIXTIME(ua.activity_completed)), '%%Y-%%m-%%d') as first_quiz_date,
+                DATE_FORMAT(MAX(FROM_UNIXTIME(ua.activity_completed)), '%%Y-%%m-%%d') as last_quiz_date
             FROM {$wpdb->prefix}learndash_user_activity ua
-            WHERE ua.user_id = %d
-            AND ua.activity_type = 'quiz'
+            JOIN {$wpdb->users} s ON ua.user_id = s.ID
+            JOIN {$wpdb->posts} c ON ua.course_id = c.ID
+            WHERE ua.activity_type = 'quiz'
+            AND s.ID = %d
             AND ua.activity_completed > 0
+            GROUP BY s.ID
         ";
         
         $result = $wpdb->get_row($wpdb->prepare($query, $student_id), ARRAY_A);
         
         // Return default values if no quiz data found
-        if (!$result || $result['total_quizzes'] == 0) {
+        if (!$result) {
             return array(
                 'total_quizzes' => 0,
                 'completed_quizzes' => 0,
-                'overall_success_rate' => 0
+                'overall_success_rate' => 0,
+                'courses' => 'No courses',
+                'first_quiz_date' => 'Never',
+                'last_quiz_date' => 'Never'
             );
         }
         
         return array(
-            'total_quizzes' => intval($result['total_quizzes']),
-            'completed_quizzes' => intval($result['completed_quizzes']),
-            'overall_success_rate' => floatval($result['overall_success_rate'])
+            'total_quizzes' => intval($result['total_quizzes'] ?? 0),
+            'completed_quizzes' => intval($result['completed_quizzes'] ?? 0),
+            'overall_success_rate' => floatval($result['overall_success_rate'] ?? 0),
+            'courses' => $result['courses'] ?? 'No courses',
+            'first_quiz_date' => $result['first_quiz_date'] ?? 'Never',
+            'last_quiz_date' => $result['last_quiz_date'] ?? 'Never'
         );
     }
+
     
     /**
      * Get dashboard CSS styles
@@ -341,6 +359,14 @@ class Simple_Teacher_Dashboard {
                 color: #666;
                 font-style: italic;
             }
+            .students-table th:nth-child(4),
+            .students-table td:nth-child(4),
+            .students-table th:nth-child(5),
+            .students-table td:nth-child(5),
+            .students-table th:nth-child(6),
+            .students-table td:nth-child(6) {
+                text-align: center;
+            }
             .login-message, .no-permission, .no-groups {
                 padding: 30px;
                 text-align: center;
@@ -401,73 +427,107 @@ class Simple_Teacher_Dashboard {
             );
         }
         
-        // Generate JavaScript with groups data
-        $js_code = '
-        <script>
+        $groups_data = json_encode($groups_json);
+        
+        return '<script>
         jQuery(document).ready(function($) {
-            var groupsData = ' . wp_json_encode($groups_json) . ';
+            var groupsData = ' . $groups_data . ';
             
+            // Handle group button clicks
             $(".group-btn").click(function() {
                 var groupId = $(this).data("group-id");
                 var groupData = groupsData[groupId];
                 
+                // Update button states
                 $(".group-btn").removeClass("active");
                 $(this).addClass("active");
                 
+                // Show loading
                 $("#students-display").html("<div class=\"loading\">Loading students...</div>");
                 
+                // Simulate loading delay for better UX
                 setTimeout(function() {
-                    displayStudents(groupData.students);
+                    displayStudents(groupData);
                 }, 300);
             });
             
-            function displayStudents(students) {
-                if (!students || students.length === 0) {
-                    $("#students-display").html("<p>No students found in this group.</p>");
-                    return;
+            function displayStudents(groupData) {
+                var html = "";
+                
+                if (!groupData || !groupData.students || groupData.students.length === 0) {
+                    html = "<div class=\"students-table\">";
+                    html += "<h4>" + groupData.name + "</h4>";
+                    html += "<p>No students found in this group.</p>";
+                    html += "</div>";
+                } else {
+                    html = "<div class=\"students-table\">";
+                    html += "<h4>Students in " + groupData.name + " (" + groupData.students.length + " students)</h4>";
+                    html += "<table>";
+                    html += "<thead><tr>";
+                    html += "<th>Student Name</th>";
+                    html += "<th>Username</th>";
+                    html += "<th>Email</th>";
+                    html += "<th>Quiz Average</th>";
+                    html += "<th>Quizzes Completed</th>";
+                    html += "<th>Total Quizzes</th>";
+                    html += "<th>Last Quiz Date</th>";
+                    html += "</tr></thead>";
+                    html += "<tbody>";
+                    
+                    groupData.students.forEach(function(student) {
+                        var stats = student.quiz_stats;
+                        html += "<tr>";
+                        html += "<td>" + escapeHtml(student.student_name) + "</td>";
+                        html += "<td>" + escapeHtml(student.student_login) + "</td>";
+                        html += "<td>" + escapeHtml(student.student_email) + "</td>";
+                        html += "<td class=\"quiz-average\">" + formatQuizAverage(stats.overall_success_rate) + "</td>";
+                        html += "<td>" + stats.completed_quizzes + "</td>";
+                        html += "<td>" + stats.total_quizzes + "</td>";
+                        var lastDate = stats.last_quiz_date ? stats.last_quiz_date : 'Never';
+                        html += "<td>" + lastDate + "</td>";
+                        html += "</tr>";
+                    });
+                    
+                    html += "</tbody></table>";
+                    html += "</div>";
                 }
                 
-                var html = "<table class=\"students-table\">";
-                html += "<thead><tr><th>Student Name</th><th>Email</th><th>Enrolled Courses</th><th>Quiz Average</th></tr></thead>";
-                html += "<tbody>";
-                
-                students.forEach(function(student) {
-                    html += "<tr>";
-                    html += "<td>" + student.student_name + "</td>";
-                    html += "<td>" + student.student_email + "</td>";
-                    html += "<td>" + student.enrolled_courses + "</td>";
-                    html += "<td>" + formatQuizAverage(student.quiz_stats.overall_success_rate) + "</td>";
-                    html += "</tr>";
-                });
-                
-                html += "</tbody></table>";
                 $("#students-display").html(html);
+            }
+            
+            function escapeHtml(text) {
+                var map = {
+                    "&": "&amp;",
+                    "<": "&lt;",
+                    ">": "&gt;",
+                    "\"": "&quot;",
+                    "\'": "&#039;"
+                };
+                return text.replace(/[&<>"\']]/g, function(m) { return map[m]; });
             }
             
             function formatQuizAverage(successRate) {
                 if (!successRate || successRate === 0) {
-                    return "<span class=\"no-data\">No data</span>";
+                    return '<span class="no-data">No data</span>';
                 }
                 
                 var rate = parseFloat(successRate);
-                var className;
+                var className = '';
                 
                 if (rate >= 80) {
-                    className = "excellent";
+                    className = 'excellent';
                 } else if (rate >= 70) {
-                    className = "good";
+                    className = 'good';
                 } else if (rate >= 60) {
-                    className = "average";
+                    className = 'average';
                 } else {
-                    className = "needs-improvement";
+                    className = 'needs-improvement';
                 }
                 
-                return "<span class=\"quiz-rate " + className + "\">" + rate.toFixed(1) + "%</span>";
+                return '<span class="quiz-rate ' + className + '">' + rate.toFixed(1) + '%</span>';
             }
         });
         </script>';
-        
-        return $js_code;
     }
 }
 
