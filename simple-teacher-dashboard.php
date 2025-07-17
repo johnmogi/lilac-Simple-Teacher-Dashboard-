@@ -50,14 +50,14 @@ class Simple_Teacher_Dashboard {
         
         // Build dashboard HTML
         $html = '<div class="simple-teacher-dashboard">';
-        $html .= '<h2>Teacher Dashboard - ' . esc_html($current_user->display_name) . '</h2>';
+        $html .= '<h2>לוח בקרה למורה - ' . esc_html($current_user->display_name) . '</h2>';
         
         // Add group selection interface
         $html .= $this->render_group_selector($groups);
         
         // Add students display area
         $html .= '<div id="students-display" class="students-display-area">';
-        $html .= '<p class="select-group-message">Please select a group to view students.</p>';
+        $html .= '<p class="select-group-message">אנא בחר קבוצה כדי לראות את התלמידים.</p>';
         $html .= '</div>';
         
         $html .= '</div>';
@@ -96,12 +96,34 @@ class Simple_Teacher_Dashboard {
     }
     
     /**
-     * Get teacher's groups using the working query pattern from QUERIES_SUCCESS.md
+     * Get teacher's groups - show all groups for teachers with group_leader role
      */
     private function get_teacher_groups($teacher_id) {
         global $wpdb;
         
-        // Use the proven working query pattern from QUERIES_SUCCESS.md
+        $user = get_user_by('id', $teacher_id);
+        
+        // If user has group_leader role, show all groups with students
+        if (in_array('group_leader', $user->roles)) {
+            $query = "
+                SELECT DISTINCT
+                    g.ID as group_id,
+                    g.post_title as group_name,
+                    g.post_status,
+                    COUNT(DISTINCT sm.user_id) as student_count
+                FROM {$wpdb->posts} g
+                LEFT JOIN {$wpdb->usermeta} sm ON sm.meta_key = CONCAT('learndash_group_users_', g.ID)
+                WHERE g.post_type = 'groups'
+                AND g.post_status = 'publish'
+                GROUP BY g.ID, g.post_title, g.post_status
+                HAVING student_count > 0
+                ORDER BY g.post_title
+            ";
+            
+            return $wpdb->get_results($query);
+        }
+        
+        // For other teachers, use the original query to find their specific groups
         $query = "
             SELECT DISTINCT
                 g.ID as group_id,
@@ -125,8 +147,8 @@ class Simple_Teacher_Dashboard {
      */
     private function render_login_message() {
         return '<div class="simple-teacher-dashboard login-message">
-            <h3>Teacher Dashboard</h3>
-            <p>Please log in to view your dashboard.</p>
+            <h3>לוח בקרה למורה</h3>
+            <p>אנא התחבר כדי לראות את לוח הבקרה שלך.</p>
         </div>';
     }
     
@@ -135,8 +157,8 @@ class Simple_Teacher_Dashboard {
      */
     private function render_no_permission_message() {
         return '<div class="simple-teacher-dashboard no-permission">
-            <h3>Access Denied</h3>
-            <p>You do not have permission to view this dashboard. This dashboard is only available for teachers and instructors.</p>
+            <h3>גישה נדחתה</h3>
+            <p>אין לך הרשאה לראות את לוח הבקרה הזה. לוח בקרה זה זמין רק למורים ומדריכים.</p>
         </div>';
     }
     
@@ -145,8 +167,8 @@ class Simple_Teacher_Dashboard {
      */
     private function render_no_groups_message($user) {
         return '<div class="simple-teacher-dashboard no-groups">
-            <h3>Teacher Dashboard - ' . esc_html($user->display_name) . '</h3>
-            <p>You are not assigned to any groups yet. Please contact your administrator.</p>
+            <h3>לוח בקרה למורה - ' . esc_html($user->display_name) . '</h3>
+            <p>אתה עדיין לא מוקצה לאף קבוצה. אנא פנה למנהל המערכת.</p>
         </div>';
     }
     
@@ -155,7 +177,7 @@ class Simple_Teacher_Dashboard {
      */
     private function render_group_selector($groups) {
         $html = '<div class="group-selector">';
-        $html .= '<h3>Select a Group</h3>';
+        $html .= '<h3>בחר קבוצה</h3>';
         $html .= '<div class="group-buttons">';
         
         foreach ($groups as $group) {
@@ -195,42 +217,50 @@ class Simple_Teacher_Dashboard {
     private function get_student_quiz_stats($student_id) {
         global $wpdb;
         
-        // Get average of ALL quiz attempts (including failed ones)
+        // Get actual quiz scores from pro_quiz_statistic tables
         $query = "
             SELECT 
-                COUNT(ua.activity_id) as total_attempts,
-                COUNT(DISTINCT ua.post_id) as unique_quizzes,
-                SUM(CASE WHEN ua.activity_status = 1 THEN 1 ELSE 0 END) as passed_attempts,
-                ROUND(AVG(
+                COUNT(ref.statistic_ref_id) as total_attempts,
+                COUNT(DISTINCT ref.quiz_post_id) as unique_quizzes,
+                COALESCE(ROUND(AVG(
                     CASE 
-                        WHEN ua.activity_status = 1 THEN 100
+                        WHEN quiz_scores.total_questions > 0 THEN (quiz_scores.earned_points / quiz_scores.total_questions) * 100
                         ELSE 0
                     END
-                ), 1) as overall_success_rate
-            FROM {$wpdb->prefix}learndash_user_activity ua
-            WHERE ua.user_id = %d
-            AND ua.activity_type = 'quiz'
-            AND ua.activity_completed > 0
+                ), 1), 0) as overall_success_rate,
+                COALESCE(ROUND(AVG(
+                    CASE 
+                        WHEN quiz_scores.total_questions > 0 AND quiz_scores.earned_points > 0 
+                        THEN (quiz_scores.earned_points / quiz_scores.total_questions) * 100
+                        ELSE NULL
+                    END
+                ), 1), 0) as completed_only_rate
+            FROM {$wpdb->prefix}learndash_pro_quiz_statistic_ref ref
+            INNER JOIN (
+                SELECT 
+                    statistic_ref_id,
+                    SUM(points) as earned_points,
+                    COUNT(*) as total_questions
+                FROM {$wpdb->prefix}learndash_pro_quiz_statistic
+                GROUP BY statistic_ref_id
+                HAVING COUNT(*) > 0
+            ) quiz_scores ON ref.statistic_ref_id = quiz_scores.statistic_ref_id
+            WHERE ref.user_id = %d
         ";
         
         $result = $wpdb->get_row($wpdb->prepare($query, $student_id), ARRAY_A);
         
-        // Return default values if no quiz data found
+        // If no results or no attempts with actual data, return zeros
         if (!$result || $result['total_attempts'] == 0) {
             return array(
                 'total_attempts' => 0,
                 'unique_quizzes' => 0,
-                'passed_attempts' => 0,
-                'overall_success_rate' => 0
+                'overall_success_rate' => 0,
+                'completed_only_rate' => 0
             );
         }
         
-        return array(
-            'total_attempts' => intval($result['total_attempts']),
-            'unique_quizzes' => intval($result['unique_quizzes']),
-            'passed_attempts' => intval($result['passed_attempts']),
-            'overall_success_rate' => floatval($result['overall_success_rate'])
-        );
+        return $result;
     }
     
     /**
@@ -288,6 +318,8 @@ class Simple_Teacher_Dashboard {
                 box-shadow: 0 2px 4px rgba(0,0,0,0.1);
                 max-width: 1200px;
                 margin: 20px auto;
+                direction: rtl;
+                text-align: right;
             }
             .simple-teacher-dashboard h2 {
                 color: #2271b1;
@@ -353,7 +385,7 @@ class Simple_Teacher_Dashboard {
             }
             .students-table th, .students-table td { 
                 padding: 12px 15px;
-                text-align: left;
+                text-align: right;
                 border-bottom: 1px solid #eee;
             }
             .students-table th {
@@ -535,15 +567,15 @@ class Simple_Teacher_Dashboard {
                 }
                 
                 var html = "<div class=\"group-stats\">";
-                html += "<h4>Group Statistics</h4>";
-                html += "<p><strong>Students with Quiz Scores:</strong> " + studentsWithScores.length + " out of " + students.length + "</p>";
+                html += "<h4>סטטיסטיקת הקבוצה</h4>";
+                html += "<p><strong>תלמידים עם ציוני בחינות:</strong> " + studentsWithScores.length + " מתוך " + students.length + "</p>";
                 if (groupAverage > 0) {
-                    html += "<p><strong>Group Average:</strong> " + formatQuizAverage(groupAverage) + "</p>";
+                    html += "<p><strong>ממוצע הקבוצה:</strong> " + formatQuizAverage(groupAverage) + "</p>";
                 }
                 html += "</div>";
                 
                 html += "<table class=\"students-table\">";
-                html += "<thead><tr><th>Student Name</th><th>Email</th><th>Course Completion</th><th>Quiz Average</th></tr></thead>";
+                html += "<thead><tr><th>שם התלמיד</th><th>אימייל</th><th>השלמת קורס</th><th>ממוצע כל הבחינות</th><th>ממוצע בחינות שהושלמו</th></tr></thead>";
                 html += "<tbody>";
                 
                 students.forEach(function(student) {
@@ -552,6 +584,7 @@ class Simple_Teacher_Dashboard {
                     html += "<td>" + student.student_email + "</td>";
                     html += "<td>" + formatCourseCompletion(student.course_completion) + "</td>";
                     html += "<td>" + formatQuizAverage(student.quiz_stats.overall_success_rate) + "</td>";
+                    html += "<td>" + formatQuizAverage(student.quiz_stats.completed_only_rate) + "</td>";
                     html += "</tr>";
                 });
                 
@@ -561,7 +594,7 @@ class Simple_Teacher_Dashboard {
             
             function formatQuizAverage(successRate) {
                 if (!successRate || successRate === 0) {
-                    return "<span class=\"no-data\">No data</span>";
+                    return "<span class=\"no-data\">אין נתונים</span>";
                 }
                 
                 var rate = parseFloat(successRate);
@@ -582,24 +615,28 @@ class Simple_Teacher_Dashboard {
             
             function formatCourseCompletion(courseData) {
                 if (!courseData || !courseData.course_name) {
-                    return "<span class=\"no-data\">No Course Data</span>";
+                    return "<span class=\"no-data\">אין נתוני קורס</span>";
                 }
                 
                 var statusClass = "";
+                var statusText = "";
                 switch(courseData.completion_status) {
                     case "Completed":
                         statusClass = "completed";
+                        statusText = "הושלם";
                         break;
                     case "In Progress":
                         statusClass = "in-progress";
+                        statusText = "בתהליך";
                         break;
                     default:
                         statusClass = "not-started";
+                        statusText = "לא התחיל";
                 }
                 
                 return "<div class=\"course-completion\">" +
                        "<div class=\"course-name\">" + courseData.course_name + "</div>" +
-                       "<span class=\"completion-status " + statusClass + "\">" + courseData.completion_status + "</span>" +
+                       "<span class=\"completion-status " + statusClass + "\">" + statusText + "</span>" +
                        "</div>";
             }
         });
