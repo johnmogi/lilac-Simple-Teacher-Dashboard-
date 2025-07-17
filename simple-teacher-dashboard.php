@@ -217,8 +217,8 @@ class Simple_Teacher_Dashboard {
     private function get_student_quiz_stats($student_id) {
         global $wpdb;
         
-        // Get actual quiz scores from pro_quiz_statistic tables
-        $query = "
+        // Method 1: Try to get quiz scores from pro_quiz_statistic tables (most accurate)
+        $pro_quiz_query = "
             SELECT 
                 COUNT(ref.statistic_ref_id) as total_attempts,
                 COUNT(DISTINCT ref.quiz_post_id) as unique_quizzes,
@@ -248,19 +248,51 @@ class Simple_Teacher_Dashboard {
             WHERE ref.user_id = %d
         ";
         
-        $result = $wpdb->get_row($wpdb->prepare($query, $student_id), ARRAY_A);
+        $pro_quiz_result = $wpdb->get_row($wpdb->prepare($pro_quiz_query, $student_id), ARRAY_A);
         
-        // If no results or no attempts with actual data, return zeros
-        if (!$result || $result['total_attempts'] == 0) {
-            return array(
-                'total_attempts' => 0,
-                'unique_quizzes' => 0,
-                'overall_success_rate' => 0,
-                'completed_only_rate' => 0
-            );
+        // If we have data from pro_quiz_statistic, use it
+        if ($pro_quiz_result && $pro_quiz_result['total_attempts'] > 0) {
+            return $pro_quiz_result;
         }
         
-        return $result;
+        // Method 2: Fallback to learndash_user_activity table
+        $activity_scores = $wpdb->get_results($wpdb->prepare("
+            SELECT activity_meta
+            FROM {$wpdb->prefix}learndash_user_activity
+            WHERE user_id = %d AND activity_type = 'quiz' AND activity_status = 1
+        ", $student_id));
+        
+        if (count($activity_scores) > 0) {
+            $total_percentage = 0;
+            $valid_scores = 0;
+            
+            foreach ($activity_scores as $score) {
+                $meta = maybe_unserialize($score->activity_meta);
+                if (isset($meta['percentage']) && is_numeric($meta['percentage'])) {
+                    $total_percentage += $meta['percentage'];
+                    $valid_scores++;
+                }
+            }
+            
+            if ($valid_scores > 0) {
+                $average = round($total_percentage / $valid_scores, 1);
+                return array(
+                    'total_attempts' => $valid_scores,
+                    'unique_quizzes' => $valid_scores,
+                    'overall_success_rate' => $average,
+                    'completed_only_rate' => $average
+                );
+            }
+        }
+        
+        // No quiz data at all - return zeros to indicate "אין נתונים"
+        // This covers both students with no attempts and students with only empty attempts
+        return array(
+            'total_attempts' => 0,
+            'unique_quizzes' => 0,
+            'overall_success_rate' => 0,
+            'completed_only_rate' => 0
+        );
     }
     
     /**
