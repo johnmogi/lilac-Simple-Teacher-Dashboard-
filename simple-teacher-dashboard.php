@@ -195,13 +195,18 @@ class Simple_Teacher_Dashboard {
     private function get_student_quiz_stats($student_id) {
         global $wpdb;
         
-        // Use the Student Summary Query pattern from QUERIES_SUCCESS.md
+        // Get average of ALL quiz attempts (including failed ones)
         $query = "
             SELECT 
-                COUNT(DISTINCT ua.post_id) as total_quizzes,
-                SUM(CASE WHEN ua.activity_status = 1 THEN 1 ELSE 0 END) as completed_quizzes,
-                ROUND((SUM(CASE WHEN ua.activity_status = 1 THEN 1 ELSE 0 END) / 
-                       COUNT(DISTINCT ua.post_id) * 100), 2) as overall_success_rate
+                COUNT(ua.activity_id) as total_attempts,
+                COUNT(DISTINCT ua.post_id) as unique_quizzes,
+                SUM(CASE WHEN ua.activity_status = 1 THEN 1 ELSE 0 END) as passed_attempts,
+                ROUND(AVG(
+                    CASE 
+                        WHEN ua.activity_status = 1 THEN 100
+                        ELSE 0
+                    END
+                ), 1) as overall_success_rate
             FROM {$wpdb->prefix}learndash_user_activity ua
             WHERE ua.user_id = %d
             AND ua.activity_type = 'quiz'
@@ -211,18 +216,63 @@ class Simple_Teacher_Dashboard {
         $result = $wpdb->get_row($wpdb->prepare($query, $student_id), ARRAY_A);
         
         // Return default values if no quiz data found
-        if (!$result || $result['total_quizzes'] == 0) {
+        if (!$result || $result['total_attempts'] == 0) {
             return array(
-                'total_quizzes' => 0,
-                'completed_quizzes' => 0,
+                'total_attempts' => 0,
+                'unique_quizzes' => 0,
+                'passed_attempts' => 0,
                 'overall_success_rate' => 0
             );
         }
         
         return array(
-            'total_quizzes' => intval($result['total_quizzes']),
-            'completed_quizzes' => intval($result['completed_quizzes']),
+            'total_attempts' => intval($result['total_attempts']),
+            'unique_quizzes' => intval($result['unique_quizzes']),
+            'passed_attempts' => intval($result['passed_attempts']),
             'overall_success_rate' => floatval($result['overall_success_rate'])
+        );
+    }
+    
+    /**
+     * Get student course completion status
+     */
+    private function get_student_course_completion($student_id) {
+        global $wpdb;
+        
+        // Get course completion data from LearnDash
+        $query = "
+            SELECT 
+                c.ID as course_id,
+                c.post_title as course_name,
+                CASE 
+                    WHEN ua.activity_status = 1 THEN 'Completed'
+                    WHEN ua.activity_status = 0 THEN 'In Progress'
+                    ELSE 'Not Started'
+                END as completion_status,
+                ua.activity_completed as completion_date
+            FROM {$wpdb->prefix}learndash_user_activity ua
+            JOIN {$wpdb->posts} c ON c.ID = ua.post_id
+            WHERE ua.user_id = %d
+            AND ua.activity_type = 'course'
+            AND c.post_type = 'sfwd-courses'
+            ORDER BY ua.activity_updated DESC
+            LIMIT 1
+        ";
+        
+        $result = $wpdb->get_row($wpdb->prepare($query, $student_id), ARRAY_A);
+        
+        if (!$result) {
+            return array(
+                'course_name' => 'No Course Data',
+                'completion_status' => 'Not Started',
+                'completion_date' => null
+            );
+        }
+        
+        return array(
+            'course_name' => $result['course_name'],
+            'completion_status' => $result['completion_status'],
+            'completion_date' => $result['completion_date']
         );
     }
     
@@ -359,6 +409,48 @@ class Simple_Teacher_Dashboard {
                 padding: 20px;
                 color: #666;
             }
+            .group-stats {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 6px;
+                margin-bottom: 20px;
+                border-left: 4px solid #2271b1;
+            }
+            .group-stats h4 {
+                margin: 0 0 10px 0;
+                color: #2271b1;
+            }
+            .group-stats p {
+                margin: 5px 0;
+                color: #333;
+            }
+            .course-completion {
+                text-align: center;
+            }
+            .course-name {
+                font-weight: bold;
+                margin-bottom: 4px;
+                color: #333;
+            }
+            .completion-status {
+                padding: 2px 8px;
+                border-radius: 12px;
+                font-size: 12px;
+                font-weight: bold;
+                text-transform: uppercase;
+            }
+            .completion-status.completed {
+                background: #d4edda;
+                color: #155724;
+            }
+            .completion-status.in-progress {
+                background: #fff3cd;
+                color: #856404;
+            }
+            .completion-status.not-started {
+                background: #f8d7da;
+                color: #721c24;
+            }
             @media (max-width: 768px) {
                 .group-buttons {
                     flex-direction: column;
@@ -382,16 +474,18 @@ class Simple_Teacher_Dashboard {
         foreach ($groups as $group) {
             $students = $this->get_group_students($group->group_id);
             
-            // Add quiz statistics for each student
+            // Add quiz statistics and course completion for each student
             $students_with_stats = array();
             foreach ($students as $student) {
                 $quiz_stats = $this->get_student_quiz_stats($student->student_id);
+                $course_completion = $this->get_student_course_completion($student->student_id);
                 $students_with_stats[] = array(
                     'student_id' => $student->student_id,
                     'student_name' => $student->student_name,
                     'student_login' => $student->student_login,
                     'student_email' => $student->student_email,
-                    'quiz_stats' => $quiz_stats
+                    'quiz_stats' => $quiz_stats,
+                    'course_completion' => $course_completion
                 );
             }
             
@@ -427,15 +521,36 @@ class Simple_Teacher_Dashboard {
                     return;
                 }
                 
-                var html = "<table class=\"students-table\">";
-                html += "<thead><tr><th>Student Name</th><th>Email</th><th>Enrolled Courses</th><th>Quiz Average</th></tr></thead>";
+                // Calculate group average for students with quiz scores
+                var studentsWithScores = students.filter(function(student) {
+                    return student.quiz_stats.overall_success_rate > 0;
+                });
+                
+                var groupAverage = 0;
+                if (studentsWithScores.length > 0) {
+                    var totalScore = studentsWithScores.reduce(function(sum, student) {
+                        return sum + parseFloat(student.quiz_stats.overall_success_rate);
+                    }, 0);
+                    groupAverage = (totalScore / studentsWithScores.length).toFixed(1);
+                }
+                
+                var html = "<div class=\"group-stats\">";
+                html += "<h4>Group Statistics</h4>";
+                html += "<p><strong>Students with Quiz Scores:</strong> " + studentsWithScores.length + " out of " + students.length + "</p>";
+                if (groupAverage > 0) {
+                    html += "<p><strong>Group Average:</strong> " + formatQuizAverage(groupAverage) + "</p>";
+                }
+                html += "</div>";
+                
+                html += "<table class=\"students-table\">";
+                html += "<thead><tr><th>Student Name</th><th>Email</th><th>Course Completion</th><th>Quiz Average</th></tr></thead>";
                 html += "<tbody>";
                 
                 students.forEach(function(student) {
                     html += "<tr>";
                     html += "<td>" + student.student_name + "</td>";
                     html += "<td>" + student.student_email + "</td>";
-                    html += "<td>" + student.enrolled_courses + "</td>";
+                    html += "<td>" + formatCourseCompletion(student.course_completion) + "</td>";
                     html += "<td>" + formatQuizAverage(student.quiz_stats.overall_success_rate) + "</td>";
                     html += "</tr>";
                 });
@@ -463,6 +578,29 @@ class Simple_Teacher_Dashboard {
                 }
                 
                 return "<span class=\"quiz-rate " + className + "\">" + rate.toFixed(1) + "%</span>";
+            }
+            
+            function formatCourseCompletion(courseData) {
+                if (!courseData || !courseData.course_name) {
+                    return "<span class=\"no-data\">No Course Data</span>";
+                }
+                
+                var statusClass = "";
+                switch(courseData.completion_status) {
+                    case "Completed":
+                        statusClass = "completed";
+                        break;
+                    case "In Progress":
+                        statusClass = "in-progress";
+                        break;
+                    default:
+                        statusClass = "not-started";
+                }
+                
+                return "<div class=\"course-completion\">" +
+                       "<div class=\"course-name\">" + courseData.course_name + "</div>" +
+                       "<span class=\"completion-status " + statusClass + "\">" + courseData.completion_status + "</span>" +
+                       "</div>";
             }
         });
         </script>';
