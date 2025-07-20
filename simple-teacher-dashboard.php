@@ -35,30 +35,59 @@ class Simple_Teacher_Dashboard {
         }
         
         $current_user = wp_get_current_user();
+        $is_admin = current_user_can('manage_options');
         
-        // Check if user has teacher role
-        if (!$this->is_teacher($current_user)) {
+        // Check if user has teacher role or is admin
+        if (!$this->is_teacher($current_user) && !$is_admin) {
             return $this->render_no_permission_message();
         }
         
-        // Get teacher's groups
-        $groups = $this->get_teacher_groups($current_user->ID);
+        // Determine which teacher to show dashboard for
+        $selected_teacher_id = $current_user->ID;
+        $selected_teacher = $current_user;
         
-        if (empty($groups)) {
-            return $this->render_no_groups_message($current_user);
+        // If admin and teacher_id parameter is provided, use that teacher
+        if ($is_admin && isset($_GET['teacher_id']) && intval($_GET['teacher_id']) > 0) {
+            $selected_teacher_id = intval($_GET['teacher_id']);
+            $selected_teacher = get_user_by('ID', $selected_teacher_id);
+            
+            // Verify the selected user is actually a teacher
+            if (!$selected_teacher || !$this->is_teacher($selected_teacher)) {
+                $selected_teacher_id = $current_user->ID;
+                $selected_teacher = $current_user;
+            }
+        }
+        
+        // Get teacher's groups
+        $groups = $this->get_teacher_groups($selected_teacher_id);
+        
+        if (empty($groups) && !$is_admin) {
+            return $this->render_no_groups_message($selected_teacher);
         }
         
         // Build dashboard HTML
         $html = '<div class="simple-teacher-dashboard">';
-        $html .= '<h2>לוח בקרה למורה - ' . esc_html($current_user->display_name) . '</h2>';
         
-        // Add group selection interface
-        $html .= $this->render_group_selector($groups);
+        // Add admin teacher selector if user is admin
+        if ($is_admin) {
+            $html .= $this->render_teacher_selector($current_user->ID, $selected_teacher_id);
+        }
         
-        // Add students display area
-        $html .= '<div id="students-display" class="students-display-area">';
-        $html .= '<p class="select-group-message">אנא בחר קבוצה כדי לראות את התלמידים.</p>';
-        $html .= '</div>';
+        $html .= '<h2>לוח בקרה למורה - ' . esc_html($selected_teacher->display_name) . '</h2>';
+        
+        // Add group selection interface or no groups message
+        if (empty($groups)) {
+            $html .= '<div class="no-groups-message">';
+            $html .= '<p>למורה הזה אין קבוצות עם תלמידים.</p>';
+            $html .= '</div>';
+        } else {
+            $html .= $this->render_group_selector($groups);
+            
+            // Add students display area
+            $html .= '<div id="students-display" class="students-display-area">';
+            $html .= '<p class="select-group-message">אנא בחר קבוצה כדי לראות את התלמידים.</p>';
+            $html .= '</div>';
+        }
         
         $html .= '</div>';
         
@@ -93,6 +122,67 @@ class Simple_Teacher_Dashboard {
         ));
         
         return $has_group_leader_meta > 0;
+    }
+    
+    /**
+     * Get all teachers for admin selection
+     */
+    private function get_all_teachers() {
+        global $wpdb;
+        
+        return $wpdb->get_results("
+            SELECT DISTINCT
+                u.ID as teacher_id,
+                u.display_name as teacher_name,
+                u.user_email as teacher_email
+            FROM {$wpdb->users} u
+            INNER JOIN {$wpdb->usermeta} um ON u.ID = um.user_id
+            WHERE um.meta_key = 'wp_capabilities' 
+            AND (
+                um.meta_value LIKE '%group_leader%' 
+                OR um.meta_value LIKE '%school_teacher%'
+                OR um.meta_value LIKE '%instructor%'
+                OR um.meta_value LIKE '%wdm_instructor%'
+            )
+            ORDER BY u.display_name
+        ");
+    }
+    
+    /**
+     * Render teacher selector for admins
+     */
+    private function render_teacher_selector($current_teacher_id, $selected_teacher_id) {
+        $teachers = $this->get_all_teachers();
+        
+        if (empty($teachers)) {
+            return '';
+        }
+        
+        $html = '<div class="admin-teacher-selector">';
+        $html .= '<h3>בחירת מורה לצפייה (מנהל)</h3>';
+        $html .= '<form method="get" class="teacher-selector-form">';
+        
+        // Preserve other GET parameters
+        foreach ($_GET as $key => $value) {
+            if ($key !== 'teacher_id') {
+                $html .= '<input type="hidden" name="' . esc_attr($key) . '" value="' . esc_attr($value) . '">';
+            }
+        }
+        
+        $html .= '<select name="teacher_id" id="teacher-selector" onchange="this.form.submit()">';
+        
+        foreach ($teachers as $teacher) {
+            $selected = ($teacher->teacher_id == $selected_teacher_id) ? 'selected' : '';
+            $html .= '<option value="' . esc_attr($teacher->teacher_id) . '" ' . $selected . '>';
+            $html .= esc_html($teacher->teacher_name) . ' (' . esc_html($teacher->teacher_email) . ')';
+            $html .= '</option>';
+        }
+        
+        $html .= '</select>';
+        $html .= '</form>';
+        $html .= '</div>';
+        
+        return $html;
     }
     
     /**
@@ -353,6 +443,40 @@ class Simple_Teacher_Dashboard {
                 direction: rtl;
                 text-align: right;
             }
+            .admin-teacher-selector {
+                background: #f8f9fa;
+                border: 2px solid #2271b1;
+                border-radius: 8px;
+                padding: 20px;
+                margin-bottom: 25px;
+                text-align: center;
+            }
+            .admin-teacher-selector h3 {
+                color: #2271b1;
+                margin: 0 0 15px 0;
+                font-size: 18px;
+            }
+            .teacher-selector-form {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+            #teacher-selector {
+                padding: 10px 15px;
+                border: 2px solid #ddd;
+                border-radius: 5px;
+                font-size: 16px;
+                min-width: 300px;
+                background: white;
+                cursor: pointer;
+                direction: ltr;
+                text-align: left;
+            }
+            #teacher-selector:focus {
+                outline: none;
+                border-color: #2271b1;
+                box-shadow: 0 0 5px rgba(34, 113, 177, 0.3);
+            }
             .simple-teacher-dashboard h2 {
                 color: #2271b1;
                 margin-top: 0;
@@ -399,6 +523,22 @@ class Simple_Teacher_Dashboard {
                 text-align: center;
                 color: #666;
                 font-style: italic;
+                padding: 40px;
+                background: #f9f9f9;
+                border-radius: 5px;
+            }
+            .no-groups-message {
+                text-align: center;
+                padding: 40px;
+                background: #fff3cd;
+                border: 1px solid #ffeaa7;
+                border-radius: 5px;
+                margin: 20px 0;
+            }
+            .no-groups-message p {
+                color: #856404;
+                font-size: 16px;
+                margin: 0;
             }
             .students-table {
                 margin-top: 20px;
