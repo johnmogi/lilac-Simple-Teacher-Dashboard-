@@ -103,7 +103,14 @@ class Simple_Teacher_Dashboard {
      */
     private function is_teacher($user) {
         // Check WordPress user roles first
-        $teacher_roles = array('school_teacher', 'instructor', 'Instructor', 'wdm_instructor');
+        $teacher_roles = array(
+            'school_teacher', 
+            'instructor', 
+            'Instructor', 
+            'wdm_instructor',
+            'stm_lms_instructor',
+            'group_leader'
+        );
         
         foreach ($teacher_roles as $role) {
             if (in_array($role, $user->roles)) {
@@ -130,7 +137,8 @@ class Simple_Teacher_Dashboard {
     private function get_all_teachers() {
         global $wpdb;
         
-        return $wpdb->get_results("
+        // Get all potential teachers first
+        $potential_teachers = $wpdb->get_results("
             SELECT DISTINCT
                 u.ID as teacher_id,
                 u.display_name as teacher_name,
@@ -142,10 +150,24 @@ class Simple_Teacher_Dashboard {
                 um.meta_value LIKE '%group_leader%' 
                 OR um.meta_value LIKE '%school_teacher%'
                 OR um.meta_value LIKE '%instructor%'
+                OR um.meta_value LIKE '%Instructor%'
                 OR um.meta_value LIKE '%wdm_instructor%'
+                OR um.meta_value LIKE '%stm_lms_instructor%'
             )
             ORDER BY u.display_name
         ");
+        
+        // Filter teachers who actually have groups with students
+        $teachers_with_students = array();
+        
+        foreach ($potential_teachers as $teacher) {
+            $groups = $this->get_teacher_groups($teacher->teacher_id);
+            if (!empty($groups)) {
+                $teachers_with_students[] = $teacher;
+            }
+        }
+        
+        return $teachers_with_students;
     }
     
     /**
