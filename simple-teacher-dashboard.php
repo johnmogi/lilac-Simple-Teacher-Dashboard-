@@ -137,12 +137,13 @@ class Simple_Teacher_Dashboard {
     private function get_all_teachers() {
         global $wpdb;
         
-        // Get all potential teachers first
+        // Enhanced query to find all potential teachers
         $potential_teachers = $wpdb->get_results("
             SELECT DISTINCT
                 u.ID as teacher_id,
                 u.display_name as teacher_name,
-                u.user_email as teacher_email
+                u.user_email as teacher_email,
+                u.user_login as teacher_login
             FROM {$wpdb->users} u
             INNER JOIN {$wpdb->usermeta} um ON u.ID = um.user_id
             WHERE um.meta_key = 'wp_capabilities' 
@@ -153,21 +154,28 @@ class Simple_Teacher_Dashboard {
                 OR um.meta_value LIKE '%Instructor%'
                 OR um.meta_value LIKE '%wdm_instructor%'
                 OR um.meta_value LIKE '%stm_lms_instructor%'
+                OR um.meta_value LIKE '%teacher%'
+                OR um.meta_value LIKE '%Teacher%'
+                OR um.meta_value LIKE '%educator%'
+                OR um.meta_value LIKE '%Educator%'
             )
-            ORDER BY u.display_name
+            UNION
+            SELECT DISTINCT
+                u.ID as teacher_id,
+                u.display_name as teacher_name,
+                u.user_email as teacher_email,
+                u.user_login as teacher_login
+            FROM {$wpdb->users} u
+            INNER JOIN {$wpdb->usermeta} um ON u.ID = um.user_id
+            WHERE um.meta_key LIKE '%group_leader%'
+            OR um.meta_key LIKE '%instructor%'
+            OR um.meta_key LIKE '%teacher%'
+            ORDER BY teacher_name
         ");
         
-        // Filter teachers who actually have groups with students
-        $teachers_with_students = array();
-        
-        foreach ($potential_teachers as $teacher) {
-            $groups = $this->get_teacher_groups($teacher->teacher_id);
-            if (!empty($groups)) {
-                $teachers_with_students[] = $teacher;
-            }
-        }
-        
-        return $teachers_with_students;
+        // Return ALL potential teachers (not just those with current groups)
+        // This ensures missing teachers like David are included
+        return $potential_teachers;
     }
     
     /**
@@ -677,6 +685,36 @@ class Simple_Teacher_Dashboard {
                 background: #f8d7da;
                 color: #721c24;
             }
+            .table-controls {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 15px;
+                padding: 10px 0;
+            }
+            .export-buttons {
+                display: flex;
+                gap: 10px;
+            }
+            .export-btn {
+                background: #2271b1;
+                color: white;
+                border: none;
+                padding: 8px 15px;
+                border-radius: 5px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: bold;
+                transition: background-color 0.3s ease;
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }
+            .export-btn:hover {
+                background: #135e96;
+                transform: translateY(-1px);
+                box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            }
             @media (max-width: 768px) {
                 .group-buttons {
                     flex-direction: column;
@@ -722,8 +760,7 @@ class Simple_Teacher_Dashboard {
         }
         
         // Generate JavaScript with groups data
-        $js_code = '
-        <script>
+        $js_code = '<script>
         jQuery(document).ready(function($) {
             var groupsData = ' . wp_json_encode($groups_json) . ';
             
@@ -768,7 +805,14 @@ class Simple_Teacher_Dashboard {
                 }
                 html += "</div>";
                 
-                html += "<table class=\"students-table\">";
+                // Add export controls
+                html += "<div class=\"table-controls\">";
+                html += "<div class=\"export-buttons\">";
+                html += "<button class=\"export-btn\" onclick=\"exportToCSV()\">📊 ייצא לCSV</button>";
+                html += "</div>";
+                html += "</div>";
+                
+                html += "<table class=\"students-table\" id=\"students-table\">";
                 html += "<thead><tr><th>שם התלמיד</th><th>אימייל</th><th>השלמת קורס</th><th>ממוצע כל הבחינות</th><th>ממוצע בחינות שהושלמו</th></tr></thead>";
                 html += "<tbody>";
                 
@@ -833,6 +877,43 @@ class Simple_Teacher_Dashboard {
                        "<span class=\"completion-status " + statusClass + "\">" + statusText + "</span>" +
                        "</div>";
             }
+            
+            // CSV Export Function
+            window.exportToCSV = function() {
+                var table = document.getElementById("students-table");
+                if (!table) {
+                    alert("אין נתונים לייצא");
+                    return;
+                }
+                
+                var csv = [];
+                var rows = table.querySelectorAll("tr");
+                
+                for (var i = 0; i < rows.length; i++) {
+                    var row = [];
+                    var cols = rows[i].querySelectorAll("td, th");
+                    
+                    for (var j = 0; j < cols.length; j++) {
+                        var cellText = cols[j].innerText.replace(/,/g, ";");
+                        row.push("\"" + cellText + "\"");
+                    }
+                    csv.push(row.join(","));
+                }
+                
+                var csvContent = csv.join("\\n");
+                var blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+                var link = document.createElement("a");
+                
+                if (link.download !== undefined) {
+                    var url = URL.createObjectURL(blob);
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", "students-data-" + new Date().toISOString().slice(0,10) + ".csv");
+                    link.style.visibility = "hidden";
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+            };
         });
         </script>';
         
