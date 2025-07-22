@@ -16,6 +16,8 @@ class Simple_Teacher_Dashboard {
     public function __construct() {
         add_action('init', array($this, 'init'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
+        add_action('wp_ajax_get_group_students', array($this, 'ajax_get_group_students'));
+        add_action('wp_ajax_nopriv_get_group_students', array($this, 'ajax_no_permission'));
     }
     
     public function init() {
@@ -24,8 +26,21 @@ class Simple_Teacher_Dashboard {
     }
     
     public function enqueue_scripts() {
-        // Enqueue jQuery for interactive features
-        wp_enqueue_script('jquery');
+        // Only register scripts here, don't enqueue them yet
+        wp_register_style(
+            'simple-teacher-dashboard-css',
+            plugins_url('assets/css/teacher-dashboard.css', __FILE__),
+            array(),
+            '2.0.0'
+        );
+        
+        wp_register_script(
+            'simple-teacher-dashboard-js',
+            plugins_url('assets/js/teacher-dashboard.js', __FILE__),
+            array('jquery'),
+            '2.0.0',
+            true
+        );
     }
     
     public function render_dashboard($atts) {
@@ -337,6 +352,9 @@ class Simple_Teacher_Dashboard {
     private function get_student_quiz_stats($student_id) {
         global $wpdb;
         
+        // Debug logging
+        error_log("[QUIZ DEBUG] Getting quiz stats for student ID: $student_id");
+        
         // Method 1: Try to get quiz scores from pro_quiz_statistic tables (most accurate)
         $pro_quiz_query = "
             SELECT 
@@ -354,7 +372,8 @@ class Simple_Teacher_Dashboard {
                         THEN (quiz_scores.earned_points / quiz_scores.total_questions) * 100
                         ELSE NULL
                     END
-                ), 1), 0) as completed_only_rate
+                ), 1), 0) as completed_only_rate,
+                GROUP_CONCAT(CONCAT(quiz_scores.earned_points, '/', quiz_scores.total_questions) SEPARATOR ', ') as debug_scores
             FROM {$wpdb->prefix}learndash_pro_quiz_statistic_ref ref
             INNER JOIN (
                 SELECT 
@@ -370,43 +389,102 @@ class Simple_Teacher_Dashboard {
         
         $pro_quiz_result = $wpdb->get_row($wpdb->prepare($pro_quiz_query, $student_id), ARRAY_A);
         
+        // Debug logging
+        if ($pro_quiz_result) {
+            error_log("[QUIZ DEBUG] Pro quiz result for student $student_id: " . print_r($pro_quiz_result, true));
+        }
+        
         // If we have data from pro_quiz_statistic, use it
         if ($pro_quiz_result && $pro_quiz_result['total_attempts'] > 0) {
+            // Fix for completed_only_rate being 0 when it shouldn't be
+            if ($pro_quiz_result['completed_only_rate'] == 0 && $pro_quiz_result['overall_success_rate'] > 0) {
+                error_log("[QUIZ DEBUG] Fixing completed_only_rate for student $student_id");
+                
+                // Recalculate completed only rate
+                $fix_query = "
+                    SELECT 
+                        ROUND(AVG(
+                            CASE 
+                                WHEN quiz_scores.total_questions > 0 AND quiz_scores.earned_points > 0
+                                THEN (quiz_scores.earned_points / quiz_scores.total_questions) * 100
+                                ELSE NULL
+                            END
+                        ), 1) as fixed_completed_rate
+                    FROM {$wpdb->prefix}learndash_pro_quiz_statistic_ref ref
+                    INNER JOIN (
+                        SELECT 
+                            statistic_ref_id,
+                            SUM(points) as earned_points,
+                            COUNT(*) as total_questions
+                        FROM {$wpdb->prefix}learndash_pro_quiz_statistic
+                        GROUP BY statistic_ref_id
+                        HAVING COUNT(*) > 0 AND SUM(points) > 0
+                    ) quiz_scores ON ref.statistic_ref_id = quiz_scores.statistic_ref_id
+                    WHERE ref.user_id = %d
+                ";
+                
+                $fixed_rate = $wpdb->get_var($wpdb->prepare($fix_query, $student_id));
+                if ($fixed_rate > 0) {
+                    $pro_quiz_result['completed_only_rate'] = $fixed_rate;
+                    error_log("[QUIZ DEBUG] Fixed completed_only_rate to $fixed_rate for student $student_id");
+                }
+            }
+            
             return $pro_quiz_result;
         }
         
         // Method 2: Fallback to learndash_user_activity table
+        error_log("[QUIZ DEBUG] No pro quiz data found, trying learndash_user_activity for student $student_id");
+        
         $activity_scores = $wpdb->get_results($wpdb->prepare("
-            SELECT activity_meta
+            SELECT activity_meta, activity_updated
             FROM {$wpdb->prefix}learndash_user_activity
             WHERE user_id = %d AND activity_type = 'quiz' AND activity_status = 1
         ", $student_id));
         
         if (count($activity_scores) > 0) {
+            error_log("[QUIZ DEBUG] Found " . count($activity_scores) . " activity records for student $student_id");
+            
             $total_percentage = 0;
             $valid_scores = 0;
+            $completed_percentage = 0;
+            $completed_scores = 0;
             
             foreach ($activity_scores as $score) {
                 $meta = maybe_unserialize($score->activity_meta);
+                error_log("[QUIZ DEBUG] Activity meta for student $student_id: " . print_r($meta, true));
+                
                 if (isset($meta['percentage']) && is_numeric($meta['percentage'])) {
-                    $total_percentage += $meta['percentage'];
+                    $percentage = floatval($meta['percentage']);
+                    $total_percentage += $percentage;
                     $valid_scores++;
+                    
+                    // Only count non-zero scores for completed rate
+                    if ($percentage > 0) {
+                        $completed_percentage += $percentage;
+                        $completed_scores++;
+                    }
                 }
             }
             
             if ($valid_scores > 0) {
-                $average = round($total_percentage / $valid_scores, 1);
+                $overall_average = round($total_percentage / $valid_scores, 1);
+                $completed_average = $completed_scores > 0 ? round($completed_percentage / $completed_scores, 1) : 0;
+                
+                error_log("[QUIZ DEBUG] Calculated averages for student $student_id - Overall: $overall_average%, Completed: $completed_average%");
+                
                 return array(
                     'total_attempts' => $valid_scores,
                     'unique_quizzes' => $valid_scores,
-                    'overall_success_rate' => $average,
-                    'completed_only_rate' => $average
+                    'overall_success_rate' => $overall_average,
+                    'completed_only_rate' => $completed_average
                 );
             }
         }
         
         // No quiz data at all - return zeros to indicate "אין נתונים"
         // This covers both students with no attempts and students with only empty attempts
+        error_log("[QUIZ DEBUG] No quiz data found for student $student_id");
         return array(
             'total_attempts' => 0,
             'unique_quizzes' => 0,
@@ -598,34 +676,6 @@ class Simple_Teacher_Dashboard {
             .students-table tr:hover {
                 background-color: #f5f5f5;
             }
-            .quiz-average {
-                text-align: center;
-                font-weight: 600;
-            }
-            .quiz-rate {
-                padding: 4px 8px;
-                border-radius: 12px;
-                font-size: 12px;
-                font-weight: bold;
-                color: white;
-            }
-            .quiz-rate.excellent {
-                background-color: #00a32a;
-            }
-            .quiz-rate.good {
-                background-color: #007cba;
-            }
-            .quiz-rate.average {
-                background-color: #dba617;
-            }
-            .quiz-rate.needs-improvement {
-                background-color: #d63638;
-            }
-            .no-data {
-                color: #666;
-                font-style: italic;
-            }
-            .login-message, .no-permission, .no-groups {
                 padding: 30px;
                 text-align: center;
                 background: #f9f9f9;
@@ -696,7 +746,7 @@ class Simple_Teacher_Dashboard {
                 display: flex;
                 gap: 10px;
             }
-            .export-btn {
+            .export-btn, .print-btn {
                 background: #2271b1;
                 color: white;
                 border: none;
@@ -710,10 +760,41 @@ class Simple_Teacher_Dashboard {
                 align-items: center;
                 gap: 5px;
             }
+            .print-btn {
+                background: #00a32a;
+            }
             .export-btn:hover {
                 background: #135e96;
                 transform: translateY(-1px);
                 box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            }
+            .print-btn:hover {
+                background: #007a1f;
+                transform: translateY(-1px);
+                box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            }
+            /* Sorting CSS */
+            .sortable {
+                cursor: pointer;
+                user-select: none;
+                position: relative;
+                transition: background-color 0.2s ease;
+            }
+            .sortable:hover {
+                background-color: #f0f0f0;
+            }
+            .sort-icon {
+                font-size: 12px;
+                margin-left: 5px;
+                color: #999;
+                font-weight: normal;
+            }
+            .sort-icon.active {
+                color: #2271b1;
+                font-weight: bold;
+            }
+            .sortable-table th {
+                white-space: nowrap;
             }
             @media (max-width: 768px) {
                 .group-buttons {
@@ -733,191 +814,103 @@ class Simple_Teacher_Dashboard {
      * Get dashboard JavaScript functionality
      */
     private function get_dashboard_javascript($groups) {
-        // Prepare groups data for JavaScript with quiz statistics
+        // Enqueue the styles and scripts
+        wp_enqueue_style('simple-teacher-dashboard-css');
+        wp_enqueue_script('jquery');
+        
+        // Prepare groups data for JavaScript
         $groups_json = array();
         foreach ($groups as $group) {
-            $students = $this->get_group_students($group->group_id);
-            
-            // Add quiz statistics and course completion for each student
-            $students_with_stats = array();
-            foreach ($students as $student) {
-                $quiz_stats = $this->get_student_quiz_stats($student->student_id);
-                $course_completion = $this->get_student_course_completion($student->student_id);
-                $students_with_stats[] = array(
-                    'student_id' => $student->student_id,
-                    'student_name' => $student->student_name,
-                    'student_login' => $student->student_login,
-                    'student_email' => $student->student_email,
-                    'quiz_stats' => $quiz_stats,
-                    'course_completion' => $course_completion
-                );
-            }
-            
             $groups_json[$group->group_id] = array(
                 'name' => $group->group_name,
-                'students' => $students_with_stats
+                'id' => $group->group_id
             );
         }
         
-        // Generate JavaScript with groups data
-        $js_code = '<script>
-        jQuery(document).ready(function($) {
-            var groupsData = ' . wp_json_encode($groups_json) . ';
-            
-            $(".group-btn").click(function() {
-                var groupId = $(this).data("group-id");
-                var groupData = groupsData[groupId];
-                
-                $(".group-btn").removeClass("active");
-                $(this).addClass("active");
-                
-                $("#students-display").html("<div class=\"loading\">Loading students...</div>");
-                
-                setTimeout(function() {
-                    displayStudents(groupData.students);
-                }, 300);
-            });
-            
-            function displayStudents(students) {
-                if (!students || students.length === 0) {
-                    $("#students-display").html("<p>No students found in this group.</p>");
-                    return;
-                }
-                
-                // Calculate group average for students with quiz scores
-                var studentsWithScores = students.filter(function(student) {
-                    return student.quiz_stats.overall_success_rate > 0;
-                });
-                
-                var groupAverage = 0;
-                if (studentsWithScores.length > 0) {
-                    var totalScore = studentsWithScores.reduce(function(sum, student) {
-                        return sum + parseFloat(student.quiz_stats.overall_success_rate);
-                    }, 0);
-                    groupAverage = (totalScore / studentsWithScores.length).toFixed(1);
-                }
-                
-                var html = "<div class=\"group-stats\">";
-                html += "<h4>סטטיסטיקת הקבוצה</h4>";
-                html += "<p><strong>תלמידים עם ציוני בחינות:</strong> " + studentsWithScores.length + " מתוך " + students.length + "</p>";
-                if (groupAverage > 0) {
-                    html += "<p><strong>ממוצע הקבוצה:</strong> " + formatQuizAverage(groupAverage) + "</p>";
-                }
-                html += "</div>";
-                
-                // Add export controls
-                html += "<div class=\"table-controls\">";
-                html += "<div class=\"export-buttons\">";
-                html += "<button class=\"export-btn\" onclick=\"exportToCSV()\">📊 ייצא לCSV</button>";
-                html += "</div>";
-                html += "</div>";
-                
-                html += "<table class=\"students-table\" id=\"students-table\">";
-                html += "<thead><tr><th>שם התלמיד</th><th>אימייל</th><th>השלמת קורס</th><th>ממוצע כל הבחינות</th><th>ממוצע בחינות שהושלמו</th></tr></thead>";
-                html += "<tbody>";
-                
-                students.forEach(function(student) {
-                    html += "<tr>";
-                    html += "<td>" + student.student_name + "</td>";
-                    html += "<td>" + student.student_email + "</td>";
-                    html += "<td>" + formatCourseCompletion(student.course_completion) + "</td>";
-                    html += "<td>" + formatQuizAverage(student.quiz_stats.overall_success_rate) + "</td>";
-                    html += "<td>" + formatQuizAverage(student.quiz_stats.completed_only_rate) + "</td>";
-                    html += "</tr>";
-                });
-                
-                html += "</tbody></table>";
-                $("#students-display").html(html);
-            }
-            
-            function formatQuizAverage(successRate) {
-                if (!successRate || successRate === 0) {
-                    return "<span class=\"no-data\">אין נתונים</span>";
-                }
-                
-                var rate = parseFloat(successRate);
-                var className;
-                
-                if (rate >= 80) {
-                    className = "excellent";
-                } else if (rate >= 70) {
-                    className = "good";
-                } else if (rate >= 60) {
-                    className = "average";
-                } else {
-                    className = "needs-improvement";
-                }
-                
-                return "<span class=\"quiz-rate " + className + "\">" + rate.toFixed(1) + "%</span>";
-            }
-            
-            function formatCourseCompletion(courseData) {
-                if (!courseData || !courseData.course_name) {
-                    return "<span class=\"no-data\">אין נתוני קורס</span>";
-                }
-                
-                var statusClass = "";
-                var statusText = "";
-                switch(courseData.completion_status) {
-                    case "Completed":
-                        statusClass = "completed";
-                        statusText = "הושלם";
-                        break;
-                    case "In Progress":
-                        statusClass = "in-progress";
-                        statusText = "בתהליך";
-                        break;
-                    default:
-                        statusClass = "not-started";
-                        statusText = "לא התחיל";
-                }
-                
-                return "<div class=\"course-completion\">" +
-                       "<div class=\"course-name\">" + courseData.course_name + "</div>" +
-                       "<span class=\"completion-status " + statusClass + "\">" + statusText + "</span>" +
-                       "</div>";
-            }
-            
-            // CSV Export Function
-            window.exportToCSV = function() {
-                var table = document.getElementById("students-table");
-                if (!table) {
-                    alert("אין נתונים לייצא");
-                    return;
-                }
-                
-                var csv = [];
-                var rows = table.querySelectorAll("tr");
-                
-                for (var i = 0; i < rows.length; i++) {
-                    var row = [];
-                    var cols = rows[i].querySelectorAll("td, th");
-                    
-                    for (var j = 0; j < cols.length; j++) {
-                        var cellText = cols[j].innerText.replace(/,/g, ";");
-                        row.push("\"" + cellText + "\"");
-                    }
-                    csv.push(row.join(","));
-                }
-                
-                var csvContent = csv.join("\\n");
-                var blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-                var link = document.createElement("a");
-                
-                if (link.download !== undefined) {
-                    var url = URL.createObjectURL(blob);
-                    link.setAttribute("href", url);
-                    link.setAttribute("download", "students-data-" + new Date().toISOString().slice(0,10) + ".csv");
-                    link.style.visibility = "hidden";
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-                }
-            };
-        });
-        </script>';
+        // Localize script with data
+        wp_localize_script(
+            'simple-teacher-dashboard-js',
+            'teacherDashboardData',
+            array(
+                'groups' => $groups_json,
+                'ajaxurl' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('teacher_dashboard_nonce')
+            )
+        );
         
-        return $js_code;
+        // Enqueue the script after localizing
+        wp_enqueue_script('simple-teacher-dashboard-js');
+        
+        // Return empty string since scripts are enqueued
+        return '';
+    }
+    
+    /**
+     * AJAX handler for getting group students
+     */
+    public function ajax_get_group_students() {
+        // Log the request for debugging
+        error_log('AJAX get_group_students called with data: ' . print_r($_POST, true));
+        
+        // Verify nonce
+        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'teacher_dashboard_nonce')) {
+            error_log('Nonce verification failed');
+            wp_send_json_error('Invalid nonce', 403);
+            return;
+        }
+        
+        // Check user permissions
+        if (!is_user_logged_in()) {
+            error_log('User not logged in');
+            wp_send_json_error('Not logged in', 401);
+            return;
+        }
+        
+        $current_user = wp_get_current_user();
+        if (!$this->is_teacher($current_user) && !current_user_can('manage_options')) {
+            error_log('User does not have teacher permissions: ' . $current_user->ID);
+            wp_send_json_error('Unauthorized', 403);
+            return;
+        }
+        
+        // Get group ID from request
+        $group_id = isset($_POST['group_id']) ? intval($_POST['group_id']) : 0;
+        
+        if (!$group_id) {
+            error_log('Invalid group ID: ' . $group_id);
+            wp_send_json_error('Invalid group ID', 400);
+            return;
+        }
+        
+        // Get students for the group
+        $students = $this->get_group_students($group_id);
+        error_log('Found ' . count($students) . ' students for group ' . $group_id);
+        
+        // Format student data for response
+        $formatted_students = array();
+        foreach ($students as $student) {
+            $quiz_stats = $this->get_student_quiz_stats($student->student_id);
+            $course_completion = $this->get_student_course_completion($student->student_id);
+            
+            $formatted_students[] = array(
+                'ID' => $student->student_id,
+                'display_name' => $student->student_name,
+                'user_email' => $student->student_email,
+                'user_login' => $student->student_login,
+                'quiz_stats' => $quiz_stats,
+                'course_completion' => $course_completion
+            );
+        }
+        
+        error_log('Sending response with ' . count($formatted_students) . ' formatted students');
+        wp_send_json_success(array('students' => $formatted_students));
+    }
+    
+    /**
+     * Handle unauthorized AJAX requests
+     */
+    public function ajax_no_permission() {
+        wp_send_json_error('You do not have permission to perform this action.', 403);
     }
 }
 
