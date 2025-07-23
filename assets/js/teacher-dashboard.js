@@ -1,7 +1,7 @@
 jQuery(document).ready(function($) {
     var groupsData = window.teacherDashboardData || {};
     var currentStudents = [];
-    var currentSort = { column: 'name', direction: 'asc' };
+    var currentSort = { column: 'completed', direction: 'asc' };
 
     // Handle group button clicks
     $(document).on('click', '.group-btn', function() {
@@ -83,14 +83,14 @@ jQuery(document).ready(function($) {
         html += '</div>';
         html += '</div>';
 
-        // Sortable table with proper grade columns
+        // Sortable table with proper grade columns (no icons)
         html += '<table id="students-table" class="students-table sortable-table">';
         html += '<thead><tr>';
-        html += '<th class="sortable" data-column="name">שם התלמיד ' + getSortIcon('name') + '</th>';
-        html += '<th class="sortable" data-column="email">אימייל ' + getSortIcon('email') + '</th>';
-        html += '<th class="sortable" data-column="course">השלמת קורס ' + getSortIcon('course') + '</th>';
-        html += '<th class="sortable" data-column="overall">ממוצע כל הבחינות ' + getSortIcon('overall') + '</th>';
-        html += '<th class="sortable" data-column="completed">ממוצע בחינות שהושלמו ' + getSortIcon('completed') + '</th>';
+        html += '<th class="sortable" data-column="name">שם התלמיד</th>';
+        html += '<th class="sortable" data-column="email">אימייל</th>';
+        html += '<th class="sortable" data-column="course">השלמת קורס</th>';
+        html += '<th class="sortable" data-column="overall">ממוצע כל הבחינות</th>';
+        html += '<th class="sortable" data-column="completed">ממוצע בחינות שהושלמו</th>';
         html += '</tr></thead>';
         html += '<tbody>';
 
@@ -107,6 +107,11 @@ jQuery(document).ready(function($) {
         html += '</tbody></table>';
 
         $('#students-display').html(html);
+        
+        // Sort by default column on first load
+        if (currentSort.column === 'completed') {
+            sortStudents('completed');
+        }
         
         // Add click handlers for sorting
         $('#students-display').off('click', '.sortable').on('click', '.sortable', function(e) {
@@ -161,12 +166,13 @@ jQuery(document).ready(function($) {
         });
         
         renderStudentsTable(currentStudents);
+        
+        // Update table headers to show current sort (without icons)
+        $('.sortable').removeClass('sorted-asc sorted-desc');
+        $('.sortable[data-column="' + currentSort.column + '"]').addClass('sorted-' + currentSort.direction);
     }
     
-    function getSortIcon(column) {
-        if (currentSort.column !== column) return '<span class="sort-icon">↕</span>';
-        return currentSort.direction === 'asc' ? '<span class="sort-icon active">↑</span>' : '<span class="sort-icon active">↓</span>';
-    }
+    // Removed getSortIcon function - no more icons
 
     // Format quiz rate with color coding
     function formatQuizRate(rate) {

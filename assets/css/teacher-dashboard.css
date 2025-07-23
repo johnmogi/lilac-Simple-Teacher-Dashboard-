@@ -91,21 +91,37 @@
     user-select: none;
 }
 
-/* Sortable Table Styles */
+/* Sortable Table Styles - Clean without icons */
 .sortable {
     cursor: pointer;
     user-select: none;
-    transition: background-color 0.2s ease;
+    transition: all 0.2s ease;
     position: relative;
+    border-bottom: 2px solid transparent;
 }
 
 .sortable:hover {
     background-color: #e8f4f8 !important;
-    color: #2271b1;
+    color: #2271b1 !important;
+    border-bottom-color: #2271b1;
 }
 
 .sortable:active {
     background-color: #d0e7f0 !important;
+    transform: translateY(1px);
+}
+
+/* Sorted header states - visual feedback without icons */
+.sortable.sorted-asc {
+    background-color: #f0f8ff;
+    border-bottom-color: #0073aa;
+    font-weight: 600;
+}
+
+.sortable.sorted-desc {
+    background-color: #f0f8ff;
+    border-bottom-color: #0073aa;
+    font-weight: 600;
 }
 
 .students-table th:hover {
@@ -275,13 +291,9 @@
         overflow-x: auto;
     }
     
-    /* Hide sort icons and emojis in print */
-    .sort-icon, .emoji, 
+    /* Hide any remaining emojis in print */
+    .emoji, 
     img[src*="emoji"], 
-    img[src*="2195.svg"], 
-    img[src*="1f4c4.svg"], 
-    img[src*="1f5a8.svg"],
-    img[alt="↕"], img[alt="↑"], img[alt="↓"], 
     img[alt="📄"], img[alt="🖨"],
     img[role="img"][class="emoji"] {
         display: none !important;
