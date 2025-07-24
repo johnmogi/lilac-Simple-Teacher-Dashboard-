@@ -1,5 +1,17 @@
 jQuery(document).ready(function($) {
-    var groupsData = window.teacherDashboardData || {};
+    // Try multiple ways to get the localized data
+    var groupsData = window.teacherDashboardData || window.teacherDashboard || {};
+    
+    // Fallback if localized data is not available
+    if (!groupsData.ajaxurl) {
+        groupsData.ajaxurl = '/wp-admin/admin-ajax.php';
+    }
+    if (!groupsData.nonce) {
+        console.warn('No nonce found in localized data');
+    }
+    
+    console.log('Dashboard data:', groupsData);
+    
     var currentStudents = [];
     var currentSort = { column: 'completed', direction: 'asc' };
 
@@ -36,11 +48,28 @@ jQuery(document).ready(function($) {
                     currentStudents = response.data.students;
                     renderStudentsTable(currentStudents);
                 } else {
-                    $('#students-display').html('<p>אירעה שגיאה: ' + (response.data || 'לא ידוע') + '</p>');
+                    var errorMsg = 'אירעה שגיאה';
+                    if (response.data) {
+                        if (typeof response.data === 'string') {
+                            errorMsg += ': ' + response.data;
+                        } else if (response.data.message) {
+                            errorMsg += ': ' + response.data.message;
+                        } else {
+                            errorMsg += ': ' + JSON.stringify(response.data);
+                        }
+                    }
+                    $('#students-display').html('<p>' + errorMsg + '</p>');
                 }
             },
             error: function(xhr, status, error) {
-                $('#students-display').html('<p>אירעה שגיאה בטעינת הנתונים. אנא נסה שוב.</p>');
+                console.log('AJAX Error:', xhr, status, error);
+                var errorMsg = 'אירעה שגיאה בטעינת הנתונים.';
+                if (xhr.responseJSON && xhr.responseJSON.data) {
+                    errorMsg += ' שגיאה: ' + xhr.responseJSON.data;
+                } else if (xhr.responseText) {
+                    errorMsg += ' פרטים: ' + xhr.responseText;
+                }
+                $('#students-display').html('<p>' + errorMsg + '</p>');
             }
         });
     });
